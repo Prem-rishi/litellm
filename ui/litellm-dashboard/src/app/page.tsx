@@ -39,6 +39,7 @@ import VectorStoreManagement from "@/components/vector_store_management"
 import UIThemeSettings from "@/components/ui_theme_settings"
 import { UiLoadingSpinner } from "@/components/ui/ui-loading-spinner"
 import { cx } from "@/lib/cva.config"
+import ObservabilityPage from "@/components/observability_page"
 
 function getCookie(name: string) {
   const cookieValue = document.cookie.split("; ").find((row) => row.startsWith(name + "="))
@@ -409,6 +410,8 @@ export default function CreateKeyPage() {
                     teams={(teams as Team[]) ?? []}
                     premiumUser={premiumUser}
                   />
+                ) : page == "observability" ? (
+                  <ObservabilityPage />
                 ) : (
                   <Usage
                     userID={userID}

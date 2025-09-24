@@ -27,6 +27,7 @@ import {
   BgColorsOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  MonitorOutlined,
 } from '@ant-design/icons';
 import { old_admin_roles, v2_admin_role_names, all_admin_roles, rolesAllowedToSeeUsage, rolesWithWriteAccess, internalUserRoles, isAdminRole } from '../utils/roles';
 import UsageIndicator from './usage_indicator';
@@ -90,6 +91,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       icon: <AppstoreOutlined style={{ fontSize: '18px' }} />
     },
     { key: "15", page: "logs", label: "Logs", icon: <LineChartOutlined style={{ fontSize: '18px' }} />},
+    { key: "27", page: "observability", label: "Observability", icon: <MonitorOutlined style={{ fontSize: '18px' }} />},
     { key: "11", page: "guardrails", label: "Guardrails", icon: <SafetyOutlined style={{ fontSize: '18px' }} />, roles: all_admin_roles },
     {
       key: "26",

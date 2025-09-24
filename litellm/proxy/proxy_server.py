@@ -9468,5 +9468,32 @@ app.include_router(ui_discovery_endpoints_router)
 ########################################################
 # MCP Server
 ########################################################
+
+# --- Observability Endpoints (In-Memory Storage) ---
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Dict, Any
+
+# In-memory store for logs/metrics
+observability_logs = []
+
+class ObservabilityLog(BaseModel):
+    timestamp: str
+    type: str
+    message: str
+    metadata: Dict[str, Any] = {}
+
+@app.post("/api/observability/logs", tags=["observability"])
+async def post_observability_log(log: ObservabilityLog):
+    """Receive a log/metric and store it in memory."""
+    observability_logs.append(log.dict())
+    return {"status": "success"}
+
+@app.get("/api/observability/logs", tags=["observability"])
+async def get_observability_logs():
+    """Return all stored logs/metrics."""
+    return JSONResponse(content=observability_logs)
+
 app.mount(path=BASE_MCP_ROUTE, app=mcp_app)
 app.include_router(mcp_rest_endpoints_router)
