@@ -8,7 +8,7 @@ const ObservabilityPage: React.FC = () => {
       <div className="mb-6">
         <Title>Observability Platform</Title>
         <Text className="mt-2">
-          Monitor system logs, metrics, and real-time activity across your LiteLLM deployment
+          POST data to /api/observability/logs to store, GET to retrieve, and visualize in real-time dashboard below
         </Text>
       </div>
       <MetricsTable />

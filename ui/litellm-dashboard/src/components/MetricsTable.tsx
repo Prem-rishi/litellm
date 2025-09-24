@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useEffect, useState } from "react";
 import { Table, Spin, Alert, Tag, Badge, Collapse, Card as AntCard } from "antd";
 import { Card, Grid, Title, Text, DonutChart, BarChart, Col } from "@tremor/react";
@@ -125,28 +127,54 @@ const MetricsTable: React.FC = () => {
   };
 
   useEffect(() => {
-    const fetchData = () => {
+    const fetchData = async () => {
       setLoading(true);
-      fetch("/api/observability/logs")
-        .then((res) => {
-          if (!res.ok) throw new Error("Failed to fetch logs");
-          return res.json();
-        })
-        .then((data) => {
-          setLogs(data);
-          setStats(calculateStats(data));
-          setLoading(false);
-        })
-        .catch((err) => {
-          setError(err.message);
-          setLoading(false);
-        });
+      setError(null);
+
+      try {
+        console.log('Fetching observability data from GET /api/observability/logs...');
+        // Try the backend API first, fallback to relative path
+        const apiUrl = process.env.NODE_ENV === 'development'
+          ? 'http://localhost:8001/api/observability/logs'
+          : '/api/observability/logs';
+        const response = await fetch(apiUrl);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: Failed to fetch observability logs`);
+        }
+
+        const data = await response.json();
+        console.log('Fetched observability data:', data.length, 'logs');
+
+        // Filter out any invalid entries
+        const validLogs = data.filter((log: ObservabilityLog) =>
+          log.timestamp && log.type && log.message
+        );
+
+        setLogs(validLogs);
+        setStats(calculateStats(validLogs));
+        console.log('Updated stats:', calculateStats(validLogs));
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+        console.error('Error fetching observability data:', errorMessage);
+        setError(errorMessage);
+      } finally {
+        setLoading(false);
+      }
     };
 
     fetchData();
-    // Refresh every 30 seconds
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
+
+    // Refresh every 15 seconds for better real-time experience
+    const interval = setInterval(() => {
+      console.log('Auto-refreshing observability data...');
+      fetchData();
+    }, 15000);
+
+    return () => {
+      console.log('Cleaning up observability data refresh interval');
+      clearInterval(interval);
+    };
   }, []);
 
   if (loading) return (
@@ -170,22 +198,35 @@ const MetricsTable: React.FC = () => {
         <Card>
           <Text>Total Logs</Text>
           <Title>{stats.totalLogs.toLocaleString()}</Title>
+          <Text className="text-sm text-gray-500 mt-1">
+            {stats.totalLogs === 0 ? 'No data yet' : 'entries stored'}
+          </Text>
         </Card>
         <Card>
           <Text>Recent Activity (1h)</Text>
           <Title>{stats.recentActivity.toLocaleString()}</Title>
-          <Text>logs in the last hour</Text>
+          <Text className="text-sm text-gray-500 mt-1">
+            {stats.recentActivity === 0 ? 'No recent activity' : 'logs in last hour'}
+          </Text>
         </Card>
         <Card>
           <Text>Log Types</Text>
           <Title>{Object.keys(stats.byType).length}</Title>
-          <Text>different types</Text>
+          <Text className="text-sm text-gray-500 mt-1">
+            {Object.keys(stats.byType).length === 0 ? 'No types yet' : 'different types'}
+          </Text>
         </Card>
         <Card>
           <Text>Latest Log</Text>
-          <Title>
-            {logs.length > 0 ? moment(logs[logs.length - 1]?.timestamp).fromNow() : 'No logs'}
+          <Title className="text-sm">
+            {logs.length > 0
+              ? moment(logs[logs.length - 1]?.timestamp).fromNow()
+              : 'No logs yet'
+            }
           </Title>
+          <Text className="text-sm text-gray-500 mt-1">
+            {logs.length > 0 && `${logs[logs.length - 1]?.type}: ${logs[logs.length - 1]?.message.substring(0, 30)}...`}
+          </Text>
         </Card>
       </Grid>
 
@@ -219,22 +260,42 @@ const MetricsTable: React.FC = () => {
       )}
 
       {/* Logs Table */}
-      <AntCard title="Recent Logs" extra={
-        <Badge count={stats.recentActivity} showZero>
-          <span style={{ marginRight: '8px' }}>Live Updates</span>
-        </Badge>
-      }>
+      <AntCard
+        title={`Observability Logs (${stats.totalLogs})`}
+        extra={
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            <Badge count={stats.recentActivity} showZero style={{ backgroundColor: '#52c41a' }}>
+              <span style={{ marginRight: '8px', fontSize: '12px' }}>Recent Activity</span>
+            </Badge>
+            <span style={{ fontSize: '12px', color: '#666' }}>Auto-refresh: 15s</span>
+          </div>
+        }
+      >
         <Table
           columns={columns}
           dataSource={logs.slice().reverse()} // Show newest first
-          rowKey={(row) => row.timestamp + row.message}
+          rowKey={(row, index) => `${row.timestamp}-${row.message}-${index}`}
           pagination={{
             pageSize: 10,
             showSizeChanger: true,
-            showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} logs`,
+            pageSizeOptions: ['5', '10', '20', '50'],
+            showTotal: (total, range) => {
+              if (total === 0) return 'No logs found - try sending data via POST /api/observability/logs';
+              return `Showing ${range[0]}-${range[1]} of ${total} logs`;
+            },
           }}
           size="small"
           scroll={{ x: 800 }}
+          locale={{
+            emptyText: (
+              <div style={{ padding: '20px', textAlign: 'center' }}>
+                <Text>No observability data found</Text>
+                <div style={{ marginTop: '8px', fontSize: '12px', color: '#666' }}>
+                  Send data using: POST /api/observability/logs
+                </div>
+              </div>
+            )
+          }}
         />
       </AntCard>
     </div>
