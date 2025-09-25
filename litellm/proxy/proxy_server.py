@@ -9469,31 +9469,235 @@ app.include_router(ui_discovery_endpoints_router)
 # MCP Server
 ########################################################
 
-# --- Observability Endpoints (In-Memory Storage) ---
-from fastapi import Request
+# --- Enhanced Observability Endpoints (Pass-through to existing endpoints) ---
+from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Dict, Any
-
-# In-memory store for logs/metrics
-observability_logs = []
+from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta
+import json
 
 class ObservabilityLog(BaseModel):
     timestamp: str
     type: str
     message: str
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    request_id: Optional[str] = None
+    user_id: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    spend: Optional[float] = None
 
-@app.post("/api/observability/logs", tags=["observability"])
-async def post_observability_log(log: ObservabilityLog):
-    """Receive a log/metric and store it in memory."""
-    observability_logs.append(log.dict())
-    return {"status": "success"}
+class ObservabilityData(BaseModel):
+    logs: List[ObservabilityLog]
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    aggregations: Dict[str, Any] = Field(default_factory=dict)
+
+@app.post("/api/observability/logs", tags=["observability"], dependencies=[Depends(user_api_key_auth)])
+async def post_observability_log(
+    log: ObservabilityLog,
+    request: Request,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth)
+):
+    """
+    Enhanced observability endpoint that processes incoming data and leverages existing endpoints.
+    Uses existing spend logs and metrics endpoints for data persistence and processing.
+    """
+    try:
+        # Process the incoming observability data
+        processed_log = log.dict()
+        processed_log["processed_at"] = datetime.now().isoformat()
+        processed_log["source"] = "external_api"
+        processed_log["user_role"] = getattr(user_api_key_dict, "user_role", None)
+
+        # If this contains spend/usage data, process it through existing spend tracking
+        if log.spend is not None or log.model or log.request_id:
+            # Use existing spend logging infrastructure
+            if hasattr(user_api_key_dict, "user_id") and user_api_key_dict.user_id:
+                processed_log["tracked_user_id"] = user_api_key_dict.user_id
+
+            # Store as a pseudo-request in the spend logs if we have spend data
+            if log.spend and log.request_id and prisma_client:
+                try:
+                    # Create a minimal log entry in the existing spend tracking system
+                    spend_log_data = {
+                        "request_id": log.request_id,
+                        "startTime": datetime.fromisoformat(log.timestamp.replace('Z', '+00:00')),
+                        "endTime": datetime.fromisoformat(log.timestamp.replace('Z', '+00:00')),
+                        "model": log.model or "observability-log",
+                        "api_key": log.api_key or user_api_key_dict.api_key,
+                        "user_id": log.user_id or getattr(user_api_key_dict, "user_id", None),
+                        "spend": log.spend,
+                        "total_tokens": log.metadata.get("total_tokens", 0),
+                        "prompt_tokens": log.metadata.get("prompt_tokens", 0),
+                        "completion_tokens": log.metadata.get("completion_tokens", 0)
+                    }
+
+                    await prisma_client.db.litellm_spendlogs.create(
+                        data=spend_log_data
+                    )
+                    processed_log["stored_in_spend_logs"] = True
+                except Exception as e:
+                    verbose_proxy_logger.error(f"Error storing in spend logs: {str(e)}")
+                    processed_log["spend_log_error"] = str(e)
+
+        # Store in the enhanced observability storage (still keep some in-memory for quick access)
+        observability_logs.append(processed_log)
+
+        # Keep only the last 1000 logs in memory to prevent memory issues
+        if len(observability_logs) > 1000:
+            observability_logs[:] = observability_logs[-1000:]
+
+        return {
+            "status": "success",
+            "message": "Observability data processed successfully",
+            "processed_fields": list(processed_log.keys()),
+            "stored_in_spend_logs": processed_log.get("stored_in_spend_logs", False)
+        }
+
+    except Exception as e:
+        verbose_proxy_logger.error(f"Error processing observability log: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process observability data: {str(e)}")
 
 @app.get("/api/observability/logs", tags=["observability"])
-async def get_observability_logs():
-    """Return all stored logs/metrics."""
-    return JSONResponse(content=observability_logs)
+async def get_observability_logs(
+    limit: Optional[int] = 100,
+    offset: Optional[int] = 0,
+    type_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth)
+):
+    """
+    Enhanced observability data retrieval that combines in-memory logs with data from existing endpoints.
+    Provides comprehensive view of system observability data.
+    """
+    try:
+        # Get in-memory logs
+        memory_logs = observability_logs.copy()
+
+        # Apply filters
+        if type_filter:
+            memory_logs = [log for log in memory_logs if log.get("type") == type_filter]
+
+        if start_date:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            memory_logs = [log for log in memory_logs
+                          if datetime.fromisoformat(log.get("timestamp", "").replace('Z', '+00:00')) >= start_dt]
+
+        if end_date:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            memory_logs = [log for log in memory_logs
+                          if datetime.fromisoformat(log.get("timestamp", "").replace('Z', '+00:00')) <= end_dt]
+
+        # Apply pagination
+        paginated_logs = memory_logs[offset:offset+limit] if memory_logs else []
+
+        # Enhance with data from existing endpoints if available
+        enhanced_data = {
+            "logs": paginated_logs,
+            "total_count": len(memory_logs),
+            "metadata": {
+                "source": "enhanced_observability",
+                "memory_logs_count": len(observability_logs),
+                "filtered_count": len(memory_logs),
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": offset + limit < len(memory_logs)
+                }
+            }
+        }
+
+        # Try to get additional metrics from existing endpoints
+        try:
+            if prisma_client and hasattr(user_api_key_dict, "user_id") and user_api_key_dict.user_id:
+                # Get some recent spend data to enhance observability
+                recent_spend_logs = await prisma_client.db.litellm_spendlogs.find_many(
+                    where={
+                        "user_id": user_api_key_dict.user_id,
+                        "startTime": {
+                            "gte": datetime.now() - timedelta(hours=24)
+                        }
+                    },
+                    order_by={"startTime": "desc"},
+                    take=10
+                )
+
+                if recent_spend_logs:
+                    enhanced_data["metadata"]["recent_spend_logs"] = len(recent_spend_logs)
+                    enhanced_data["metadata"]["recent_models_used"] = list(set(log.model for log in recent_spend_logs if log.model))
+                    enhanced_data["metadata"]["total_recent_spend"] = sum(log.spend for log in recent_spend_logs if log.spend)
+        except Exception as e:
+            verbose_proxy_logger.debug(f"Could not fetch additional metrics: {str(e)}")
+
+        return JSONResponse(content=enhanced_data)
+
+    except Exception as e:
+        verbose_proxy_logger.error(f"Error retrieving observability logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve observability data: {str(e)}")
+
+@app.get("/api/observability/metrics", tags=["observability"], dependencies=[Depends(user_api_key_auth)])
+async def get_observability_metrics(
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth)
+):
+    """
+    Get comprehensive observability metrics by leveraging existing model metrics and spend tracking endpoints.
+    """
+    try:
+        metrics = {
+            "timestamp": datetime.now().isoformat(),
+            "observability_logs": {
+                "total_stored": len(observability_logs),
+                "types": {},
+                "recent_activity": 0
+            }
+        }
+
+        # Analyze in-memory logs
+        one_hour_ago = datetime.now() - timedelta(hours=1)
+        for log in observability_logs:
+            log_type = log.get("type", "unknown")
+            metrics["observability_logs"]["types"][log_type] = metrics["observability_logs"]["types"].get(log_type, 0) + 1
+
+            try:
+                log_time = datetime.fromisoformat(log.get("timestamp", "").replace('Z', '+00:00'))
+                if log_time >= one_hour_ago:
+                    metrics["observability_logs"]["recent_activity"] += 1
+            except:
+                pass
+
+        # Try to get additional system metrics from existing endpoints
+        try:
+            if prisma_client and hasattr(user_api_key_dict, "user_id"):
+                # Get model usage stats
+                recent_models = await prisma_client.db.litellm_spendlogs.group_by(
+                    by=["model"],
+                    where={
+                        "startTime": {
+                            "gte": datetime.now() - timedelta(hours=24)
+                        }
+                    },
+                    _count={"_all": True}
+                )
+
+                if recent_models:
+                    metrics["model_usage"] = {
+                        model.model: model._count.get("_all", 0)
+                        for model in recent_models if model.model
+                    }
+        except Exception as e:
+            verbose_proxy_logger.debug(f"Could not fetch model metrics: {str(e)}")
+
+        return JSONResponse(content=metrics)
+
+    except Exception as e:
+        verbose_proxy_logger.error(f"Error retrieving observability metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve metrics: {str(e)}")
+
+# In-memory store for logs/metrics (keeping for backwards compatibility and quick access)
+# Initialize with empty list - all data comes from POST calls
+observability_logs = []
 
 app.mount(path=BASE_MCP_ROUTE, app=mcp_app)
 app.include_router(mcp_rest_endpoints_router)

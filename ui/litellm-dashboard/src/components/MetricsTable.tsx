@@ -17,6 +17,12 @@ interface MetricsStats {
   totalLogs: number;
   byType: Record<string, number>;
   recentActivity: number;
+  // Enhanced fields from the API
+  recentModelsUsed?: string[];
+  totalRecentSpend?: number;
+  recentSpendLogs?: number;
+  memory_logs_count?: number;
+  filtered_count?: number;
 }
 
 const getTypeIcon = (type: string) => {
@@ -126,34 +132,75 @@ const MetricsTable: React.FC = () => {
     };
   };
 
+  const fetchDataWithAuth = async (endpoint: string, options: RequestInit = {}) => {
+    const apiUrl = process.env.NODE_ENV === 'development'
+      ? `http://localhost:8001${endpoint}`
+      : endpoint;
+
+    // Try to get auth token from localStorage or context
+    const accessToken = localStorage.getItem('accessToken') || sessionStorage.getItem('accessToken');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string> || {}),
+    };
+
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
+    }
+
+    const response = await fetch(apiUrl, {
+      ...options,
+      headers,
+    });
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Authentication required. Please log in.');
+      }
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return response.json();
+  };
+
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
       setError(null);
 
       try {
-        console.log('Fetching observability data from GET /api/observability/logs...');
-        // Try the backend API first, fallback to relative path
-        const apiUrl = process.env.NODE_ENV === 'development'
-          ? 'http://localhost:8001/api/observability/logs'
-          : '/api/observability/logs';
-        const response = await fetch(apiUrl);
+        console.log('Fetching enhanced observability data from GET /api/observability/logs...');
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: Failed to fetch observability logs`);
-        }
+        const data = await fetchDataWithAuth('/api/observability/logs?limit=100');
+        console.log('Fetched enhanced observability data:', data);
 
-        const data = await response.json();
-        console.log('Fetched observability data:', data.length, 'logs');
+        // Handle the new response structure
+        const logsData = data.logs || data;
+        const metadata = data.metadata || {};
+
+        console.log('Processing logs:', logsData.length, 'entries');
+        console.log('Metadata:', metadata);
 
         // Filter out any invalid entries
-        const validLogs = data.filter((log: ObservabilityLog) =>
+        const validLogs = (Array.isArray(logsData) ? logsData : []).filter((log: ObservabilityLog) =>
           log.timestamp && log.type && log.message
         );
 
         setLogs(validLogs);
-        setStats(calculateStats(validLogs));
-        console.log('Updated stats:', calculateStats(validLogs));
+        const calculatedStats = calculateStats(validLogs);
+
+        // Enhance stats with metadata from the enhanced API
+        const enhancedStats = {
+          ...calculatedStats,
+          ...metadata,
+          recentModelsUsed: metadata.recent_models_used || [],
+          totalRecentSpend: metadata.total_recent_spend || 0,
+          recentSpendLogs: metadata.recent_spend_logs || 0
+        };
+
+        setStats(enhancedStats);
+        console.log('Updated enhanced stats:', enhancedStats);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
         console.error('Error fetching observability data:', errorMessage);
@@ -167,7 +214,7 @@ const MetricsTable: React.FC = () => {
 
     // Refresh every 15 seconds for better real-time experience
     const interval = setInterval(() => {
-      console.log('Auto-refreshing observability data...');
+      console.log('Auto-refreshing enhanced observability data...');
       fetchData();
     }, 15000);
 
@@ -200,6 +247,9 @@ const MetricsTable: React.FC = () => {
           <Title>{stats.totalLogs.toLocaleString()}</Title>
           <Text className="text-sm text-gray-500 mt-1">
             {stats.totalLogs === 0 ? 'No data yet' : 'entries stored'}
+            {stats.memory_logs_count && (
+              <span className="block text-xs">({stats.memory_logs_count} in memory)</span>
+            )}
           </Text>
         </Card>
         <Card>
@@ -229,6 +279,40 @@ const MetricsTable: React.FC = () => {
           </Text>
         </Card>
       </Grid>
+
+      {/* Enhanced Summary Cards - Show additional data from existing endpoints */}
+      {(stats.recentSpendLogs || stats.totalRecentSpend || (stats.recentModelsUsed && stats.recentModelsUsed.length > 0)) && (
+        <Grid numItems={1} numItemsSm={2} numItemsLg={3} className="gap-4 mb-6">
+          {stats.recentSpendLogs && (
+            <Card>
+              <Text>Recent Spend Logs (24h)</Text>
+              <Title>{stats.recentSpendLogs.toLocaleString()}</Title>
+              <Text className="text-sm text-gray-500 mt-1">
+                entries from spend tracking
+              </Text>
+            </Card>
+          )}
+          {stats.totalRecentSpend && (
+            <Card>
+              <Text>Total Recent Spend (24h)</Text>
+              <Title>${stats.totalRecentSpend.toFixed(4)}</Title>
+              <Text className="text-sm text-gray-500 mt-1">
+                from integrated spend logs
+              </Text>
+            </Card>
+          )}
+          {stats.recentModelsUsed && stats.recentModelsUsed.length > 0 && (
+            <Card>
+              <Text>Recent Models (24h)</Text>
+              <Title>{stats.recentModelsUsed.length}</Title>
+              <Text className="text-sm text-gray-500 mt-1">
+                {stats.recentModelsUsed.slice(0, 2).join(', ')}
+                {stats.recentModelsUsed.length > 2 && '...'}
+              </Text>
+            </Card>
+          )}
+        </Grid>
+      )}
 
       {/* Charts */}
       {chartData.length > 0 && (
